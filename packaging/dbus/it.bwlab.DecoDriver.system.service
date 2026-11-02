@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=it.bwlab.DecoDriver
+Exec=/usr/bin/deco-daemon
+SystemdService=deco-daemon.service

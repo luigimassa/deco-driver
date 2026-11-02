@@ -1,0 +1,9 @@
+/target
+/dist
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+analysis/
+XPPenLinux3.4.9-240607/
+*.deb

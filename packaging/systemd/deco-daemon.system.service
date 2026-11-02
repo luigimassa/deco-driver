@@ -1,0 +1,15 @@
+[Unit]
+Description=XP-Pen Deco 02 userspace driver
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=it.bwlab.DecoDriver
+ExecStart=/usr/bin/deco-daemon
+Environment=RUST_LOG=deco_daemon=info,deco_protocol=info
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

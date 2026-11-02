@@ -1,0 +1,21 @@
+[package]
+name = "deco-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "systemd --user daemon: HID reader, actions, uinput, D-Bus"
+
+[dependencies]
+deco-protocol.workspace = true
+deco-input.workspace = true
+deco-config.workspace = true
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["full"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+udev = "0.9"
+zbus = { workspace = true, features = ["tokio"] }
+zvariant = "5"

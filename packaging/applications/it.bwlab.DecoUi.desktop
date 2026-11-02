@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Deco Driver
+Comment=XP-Pen Deco 02 settings
+Exec=deco-ui
+Icon=it.bwlab.DecoUi
+Terminal=false
+Categories=Settings;HardwareSettings;
+StartupNotify=true
+DBusActivatable=false
+Keywords=tablet;xp-pen;deco;pen;

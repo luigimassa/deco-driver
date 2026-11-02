@@ -1,0 +1,9 @@
+# XP-Pen (VID 28bd) hidraw + uinput access for the logged-in seat.
+# Safer than the vendor MODE=0666 rule.
+KERNEL=="hidraw*", ATTRS{idVendor}=="28bd", TAG+="uaccess", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="28bd", TAG+="uaccess", GROUP="plugdev"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+# Kernel hid-generic also creates a stylus — deco-daemon already injects via uinput.
+# Ignoring the kernel nodes avoids a second cursor on GNOME.
+ACTION=="add|change", KERNEL=="event*", ATTRS{idVendor}=="28bd", ATTRS{idProduct}=="0803", TAG+="uaccess", GROUP="plugdev", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+ACTION=="add|change", KERNEL=="event*", ATTRS{idVendor}=="28bd", ATTRS{idProduct}=="0903", TAG+="uaccess", GROUP="plugdev", ENV{LIBINPUT_IGNORE_DEVICE}="1"

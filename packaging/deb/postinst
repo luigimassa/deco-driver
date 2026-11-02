@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm control --reload-rules || true
+  udevadm trigger || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --global enable deco-daemon.service >/dev/null 2>&1 || true
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    systemctl --machine="${SUDO_USER}@.host" --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --machine="${SUDO_USER}@.host" --user enable --now deco-daemon.service >/dev/null 2>&1 || true
+  fi
+fi
+exit 0

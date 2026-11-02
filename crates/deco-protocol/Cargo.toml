@@ -1,0 +1,10 @@
+[package]
+name = "deco-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XP-Pen HID protocol parser and command builder (Deco 02)"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

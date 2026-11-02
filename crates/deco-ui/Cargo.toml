@@ -1,0 +1,17 @@
+[package]
+name = "deco-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GTK4 / libadwaita settings UI for the Deco 02 driver"
+
+[dependencies]
+deco-config.workspace = true
+deco-protocol.workspace = true
+gtk = { version = "0.10", package = "gtk4", features = ["v4_16"] }
+adw = { version = "0.8", package = "libadwaita", features = ["v1_7"] }
+serde_json.workspace = true
+zbus = { version = "5", features = ["blocking-api"] }
+ksni = { version = "0.3", features = ["blocking"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

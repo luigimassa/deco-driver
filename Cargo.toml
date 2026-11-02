@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/deco-protocol",
+    "crates/deco-input",
+    "crates/deco-config",
+    "crates/deco-daemon",
+    "crates/deco-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Userspace XP-Pen Deco 02 driver for GNOME / Ubuntu"
+
+[workspace.dependencies]
+deco-protocol = { path = "crates/deco-protocol" }
+deco-input = { path = "crates/deco-input" }
+deco-config = { path = "crates/deco-config" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+toml = "0.8"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
