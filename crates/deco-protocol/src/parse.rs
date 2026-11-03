@@ -58,6 +58,62 @@ pub const DECO02_HID_MAX_X: u32 = 0x5750;
 pub const DECO02_HID_MAX_Y: u32 = 0x3692;
 pub const DECO02_HID_MAX_PRESSURE: u32 = 0x1FFF;
 
+/// Deco 02 exposes three HID interfaces. Only one of them accepts host commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceRole {
+    /// Report 0x07 pen plus express keys (0x03 / 0x06). Interrupt IN only.
+    Digitizer,
+    /// Vendor page 0xFF0A, report 0x02. The only interface with an OUT endpoint.
+    Command,
+    /// Boot mouse. Host writes here stall the device (`POLLERR` on every interface).
+    Unused,
+}
+
+/// Classify a report descriptor. Digitizer wins when both axes and an output report exist.
+pub fn interface_role(rdesc: &[u8]) -> InterfaceRole {
+    if parse_digitizer_rdesc(rdesc).is_some() {
+        InterfaceRole::Digitizer
+    } else if has_output_report(rdesc) {
+        InterfaceRole::Command
+    } else {
+        InterfaceRole::Unused
+    }
+}
+
+/// True when the descriptor contains a HID Output main item (interrupt OUT / SET_REPORT).
+fn has_output_report(rdesc: &[u8]) -> bool {
+    let mut i = 0;
+    while i < rdesc.len() {
+        let prefix = rdesc[i];
+        i += 1;
+        if prefix == 0xFE {
+            if i + 1 >= rdesc.len() {
+                break;
+            }
+            let size = rdesc[i] as usize;
+            i += 2 + size;
+            continue;
+        }
+        let size = match prefix & 0x03 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
+        if i + size > rdesc.len() {
+            break;
+        }
+        i += size;
+        let item_type = (prefix >> 2) & 0x03;
+        let item_tag = prefix >> 4;
+        // Main item, tag Output (0x91…).
+        if item_type == 0 && item_tag == 9 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Read Generic Desktop X/Y and Digitizer Tip Pressure logical max for report ID 7.
 pub fn parse_digitizer_rdesc(rdesc: &[u8]) -> Option<Caps> {
     let mut i = 0;
@@ -790,5 +846,23 @@ mod tests {
         assert_eq!(caps.max_x, DECO02_HID_MAX_X);
         assert_eq!(caps.max_y, DECO02_HID_MAX_Y);
         assert_eq!(caps.max_pressure, DECO02_HID_MAX_PRESSURE);
+        assert_eq!(interface_role(&rdesc), InterfaceRole::Digitizer);
+    }
+
+    #[test]
+    fn deco02_vendor_iface_is_command_mouse_is_unused() {
+        // Interface 2 from a live Deco 02: usage page 0xFF0A, report 0x02, output 7 bytes.
+        let vendor = [
+            0x06, 0x0a, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x02, 0x75, 0x08, 0x95,
+            0x09, 0x15, 0x00, 0x26, 0xff, 0x00, 0x81, 0x02, 0x09, 0x03, 0x75, 0x08, 0x95, 0x07,
+            0x15, 0x00, 0x26, 0xff, 0x00, 0x91, 0x02, 0xc0,
+        ];
+        assert_eq!(interface_role(&vendor), InterfaceRole::Command);
+        // Interface 0 is a boot mouse: input and feature items, no output.
+        let mouse = [
+            0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x08, 0x09, 0x01, 0xa1, 0x00, 0x81, 0x02,
+            0xc0, 0xc0, 0x05, 0x01, 0x09, 0x00, 0xa1, 0x01, 0x85, 0x01, 0xb1, 0x02, 0xc0,
+        ];
+        assert_eq!(interface_role(&mouse), InterfaceRole::Unused);
     }
 }

@@ -9,9 +9,9 @@ pub mod profile;
 
 pub use commands::{Command, ReportId, LINUX_RELEASE, REPORT_ID};
 pub use parse::{
-    diagnose_event, hex_dump, parse_digitizer_rdesc, parse_report, Caps, DeviceEvent, KeyState,
-    ParsedReport, PenState, RingDirection, DECO02_HID_MAX_PRESSURE, DECO02_HID_MAX_X,
-    DECO02_HID_MAX_Y,
+    diagnose_event, hex_dump, interface_role, parse_digitizer_rdesc, parse_report, Caps,
+    DeviceEvent, InterfaceRole, KeyState, ParsedReport, PenState, RingDirection,
+    DECO02_HID_MAX_PRESSURE, DECO02_HID_MAX_X, DECO02_HID_MAX_Y,
 };
 pub use profile::{DeviceProfile, DECO02, DECO02_PIDS, VID};
 

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use deco_protocol::commands::{init_commands, parse_indexed_caps, LINUX_RELEASE};
 use deco_protocol::parse::{
-    parse_digitizer_rdesc, parse_report, Caps, DeviceEvent, DECO02_HID_MAX_PRESSURE,
-    DECO02_HID_MAX_X, DECO02_HID_MAX_Y,
+    interface_role, parse_digitizer_rdesc, parse_report, Caps, DeviceEvent, InterfaceRole,
+    DECO02_HID_MAX_PRESSURE, DECO02_HID_MAX_X, DECO02_HID_MAX_Y,
 };
 use std::ffi::CString;
 
@@ -40,7 +40,18 @@ pub fn list_deco02(api: &HidApi) -> Vec<(u16, String)> {
     deco
 }
 
-pub fn open_and_init(api: &HidApi, path: &str) -> Result<(HidDevice, DeviceInfo), String> {
+/// Role from sysfs, before opening the node. `None` if the descriptor cannot be read.
+pub fn interface_role_at(path: &str) -> Option<InterfaceRole> {
+    let name = path.rsplit('/').next()?;
+    let rdesc_path = format!("/sys/class/hidraw/{name}/device/report_descriptor");
+    let bytes = std::fs::read(&rdesc_path).ok()?;
+    Some(interface_role(&bytes))
+}
+
+pub fn open_and_init(
+    api: &HidApi,
+    path: &str,
+) -> Result<(HidDevice, DeviceInfo, InterfaceRole), String> {
     info!(%path, "opening hidraw");
     let cpath = CString::new(path).map_err(|e| e.to_string())?;
     let dev = api.open_path(&cpath).map_err(|e| {
@@ -61,10 +72,12 @@ pub fn open_and_init(api: &HidApi, path: &str) -> Result<(HidDevice, DeviceInfo)
         max_pressure: DECO02_HID_MAX_PRESSURE,
         resolution: deco_protocol::DEFAULT_RESOLUTION_LPI,
     };
+    let mut role = InterfaceRole::Unused;
     if let Some(name) = path.rsplit('/').next() {
         let rdesc_path = format!("/sys/class/hidraw/{name}/device/report_descriptor");
         match std::fs::read(&rdesc_path) {
             Ok(bytes) => {
+                role = interface_role(&bytes);
                 if let Some(c) = parse_digitizer_rdesc(&bytes) {
                     info!(
                         max_x = c.max_x,
@@ -73,36 +86,45 @@ pub fn open_and_init(api: &HidApi, path: &str) -> Result<(HidDevice, DeviceInfo)
                         "caps from HID report descriptor"
                     );
                     caps = c;
-                } else {
-                    warn!(n = bytes.len(), "report descriptor has no digitizer axes");
                 }
             }
             Err(e) => warn!(%e, %rdesc_path, "cannot read report descriptor"),
         }
     }
-    match dev.get_indexed_string(100) {
-        Ok(Some(s)) => {
-            let mut bytes = Vec::new();
-            for ch in s.encode_utf16() {
-                bytes.extend_from_slice(&ch.to_le_bytes());
+    info!(?role, "interface role");
+    // Indexed string 100 and init reports go out as control/interrupt OUT.
+    // The mouse and digitizer interfaces have no OUT endpoint: a write stalls
+    // the whole device and every hidraw read returns "device disconnected".
+    if role == InterfaceRole::Digitizer {
+        match dev.get_indexed_string(100) {
+            Ok(Some(s)) => {
+                let mut bytes = Vec::new();
+                for ch in s.encode_utf16() {
+                    bytes.extend_from_slice(&ch.to_le_bytes());
+                }
+                debug!(n = bytes.len(), hex = %hex_dump(&bytes), "indexed string 100");
+                if let Some(c) = parse_indexed_caps(&bytes) {
+                    // Windows 24-bit space (often 0xCC64). Live reports are HID 0x07.
+                    info!(?c, "indexed string 100 caps ignored in favour of HID rdesc");
+                } else {
+                    warn!(
+                        hex = %hex_dump(&bytes),
+                        "indexed string 100 did not parse as MaxX/Y/Press"
+                    );
+                }
             }
-            debug!(n = bytes.len(), hex = %hex_dump(&bytes), "indexed string 100");
-            if let Some(c) = parse_indexed_caps(&bytes) {
-                // Windows 24-bit space (often 0xCC64). Live reports are HID 0x07.
-                info!(?c, "indexed string 100 caps ignored in favour of HID rdesc");
-            } else {
-                warn!(hex = %hex_dump(&bytes), "indexed string 100 did not parse as MaxX/Y/Press");
-            }
+            Ok(None) => warn!("indexed string 100 empty"),
+            Err(e) => warn!(%e, "hid_get_indexed_string(100) failed — using default caps"),
         }
-        Ok(None) => warn!("indexed string 100 empty"),
-        Err(e) => warn!(%e, "hid_get_indexed_string(100) failed — using default caps"),
     }
     debug_assert!(caps.max_x > 0 && caps.max_y > 0);
-    for cmd in init_commands() {
-        debug_assert_eq!(cmd[0], 0x02);
-        match dev.write(&cmd) {
-            Ok(n) => debug!(n, hex = %hex_dump(&cmd), "init write"),
-            Err(e) => error!(%e, hex = %hex_dump(&cmd), "init write failed"),
+    if role == InterfaceRole::Command {
+        for cmd in init_commands() {
+            debug_assert_eq!(cmd[0], 0x02);
+            match dev.write(&cmd) {
+                Ok(n) => debug!(n, hex = %hex_dump(&cmd), "init write"),
+                Err(e) => error!(%e, hex = %hex_dump(&cmd), "init write failed"),
+            }
         }
     }
     // Give the device a moment to reply with a 0x06 'd' caps frame.
@@ -137,6 +159,7 @@ pub fn open_and_init(api: &HidApi, path: &str) -> Result<(HidDevice, DeviceInfo)
             firmware,
             caps,
         },
+        role,
     ))
 }
 
@@ -144,6 +167,9 @@ pub fn read_loop(
     dev: HidDevice,
     tx: std::sync::mpsc::Sender<DeviceEvent>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    release_on_exit: bool,
+    reader_id: u64,
+    exited: std::sync::mpsc::Sender<u64>,
 ) {
     let mut buf = [0u8; HID_REPORT_LEN];
     let timeout = HID_POLL_TIMEOUT.as_millis() as i32;
@@ -180,7 +206,7 @@ pub fn read_loop(
                         last_kind = kind;
                     }
                     if tx.send(ev).is_err() {
-                        return;
+                        break;
                     }
                 }
             }
@@ -197,10 +223,15 @@ pub fn read_loop(
             }
         }
     }
-    info!(seen, "hid reader stopping, sending LinuxRelease");
-    if let Err(e) = dev.write(&LINUX_RELEASE) {
-        warn!(%e, "LinuxRelease write failed");
+    if release_on_exit {
+        info!(seen, "hid reader stopping, sending LinuxRelease");
+        if let Err(e) = dev.write(&LINUX_RELEASE) {
+            warn!(%e, "LinuxRelease write failed");
+        }
+    } else {
+        info!(seen, "hid reader stopping");
     }
+    let _ = exited.send(reader_id);
 }
 
 pub fn dump_reports(seconds: u64) -> Result<(), String> {
@@ -209,9 +240,22 @@ pub fn dump_reports(seconds: u64) -> Result<(), String> {
     if devices.is_empty() {
         return Err("no Deco 02 (28bd:0803/0903) found — plug the tablet and retry".into());
     }
-    let (pid, path) = &devices[0];
+    for (_, path) in &devices {
+        if interface_role_at(path) == Some(InterfaceRole::Command) {
+            println!("init {path}");
+            if let Err(e) = open_and_init(&api, path) {
+                eprintln!("init {path}: {e}");
+            }
+        }
+    }
+    let Some((pid, path)) = devices
+        .iter()
+        .find(|(_, p)| interface_role_at(p) == Some(InterfaceRole::Digitizer))
+    else {
+        return Err("Deco 02 found but no digitizer interface (report 0x07)".into());
+    };
     println!("opening {path} pid={pid:#06x}");
-    let (dev, info) = open_and_init(&api, path)?;
+    let (dev, info, _role) = open_and_init(&api, path)?;
     println!(
         "caps max_x={} max_y={} press={} fw={}",
         info.caps.max_x, info.caps.max_y, info.caps.max_pressure, info.firmware

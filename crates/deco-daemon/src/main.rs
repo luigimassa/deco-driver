@@ -13,16 +13,27 @@ use std::time::Duration;
 use deco_config::DriverConfig;
 use deco_input::InputDevices;
 use deco_protocol::diagnose_event;
-use deco_protocol::parse::{Caps, DeviceEvent};
+use deco_protocol::parse::{Caps, DeviceEvent, InterfaceRole};
 use deco_protocol::{HOTPLUG_SETTLE, XP_PEN_VID};
 use hidapi::HidApi;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use zbus::connection::Builder;
 
 use crate::actions::ActionEngine;
 use crate::dbus::{DriverService, DriverServiceSignals, PATH, SERVICE};
-use crate::hid::{dump_reports, list_deco02, open_and_init, read_loop};
+use crate::hid::{dump_reports, interface_role_at, list_deco02, open_and_init, read_loop};
+
+struct HidReader {
+    id: u64,
+    path: String,
+    role: InterfaceRole,
+    stop: Arc<AtomicBool>,
+}
+
+fn digitizer_open(readers: &[HidReader]) -> bool {
+    readers.iter().any(|r| r.role == InterfaceRole::Digitizer)
+}
 use crate::hotplug::PlugEvent;
 use crate::state::{AppState, DeviceInfo};
 
@@ -107,6 +118,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let (event_tx, event_rx) = mpsc::channel::<DeviceEvent>();
     let (plug_tx, plug_rx) = mpsc::channel::<PlugEvent>();
+    let (exit_tx, exit_rx) = mpsc::channel::<u64>();
     hotplug::spawn(plug_tx.clone());
 
     // Initial scan after a short delay in case the tablet is already plugged.
@@ -123,7 +135,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut engine = ActionEngine::default();
-    let mut readers: Vec<(String, Arc<AtomicBool>)> = Vec::new();
+    let mut readers: Vec<HidReader> = Vec::new();
+    let mut next_reader: u64 = 1;
     let mut last_pressure_emit = 0u32;
     let iface = connection
         .object_server()
@@ -135,7 +148,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             _ = rescan.tick() => {
-                if state.device.read().await.is_none() {
+                if !digitizer_open(&readers) {
                     if let Ok(api) = HidApi::new() {
                         for (pid, path) in list_deco02(&api) {
                             let _ = plug_tx.send(PlugEvent::Added { pid, path });
@@ -145,35 +158,60 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ = poll.tick() => {}
         }
+        while let Ok(id) = exit_rx.try_recv() {
+            let role = readers.iter().find(|r| r.id == id).map(|r| r.role);
+            readers.retain(|r| r.id != id);
+            info!(id, ?role, "hid reader exited");
+            if !digitizer_open(&readers) {
+                *state.device.write().await = None;
+                kernel_grab.clear();
+            }
+        }
         while let Ok(plug) = plug_rx.try_recv() {
             match plug {
                 PlugEvent::Added { pid, path } => {
-                    if path.is_empty() || readers.iter().any(|(p, _)| p == &path) {
+                    if path.is_empty() || readers.iter().any(|r| r.path == path) {
+                        continue;
+                    }
+                    if interface_role_at(&path) == Some(InterfaceRole::Unused) {
+                        debug!(%path, "skip mouse interface (no OUT endpoint)");
                         continue;
                     }
                     info!(pid = format_args!("{pid:#06x}"), %path, "device added");
                     if readers.is_empty() {
                         tokio::time::sleep(HOTPLUG_SETTLE).await;
                     }
-                    match attach(&state, &path, event_tx.clone()).await {
-                        Ok((info, stop)) => {
-                            readers.push((path.clone(), stop));
-                            info!(
-                                pid = format_args!("{:#06x}", info.pid),
-                                name = %info.name,
-                                fw = %info.firmware,
-                                path = %path,
-                                interfaces = readers.len(),
-                                max_x = info.caps.max_x,
-                                max_y = info.caps.max_y,
-                                press = info.caps.max_pressure,
-                                "tablet attached"
-                            );
-                            debug_assert!(deco_protocol::is_deco02(info.pid));
-                            debug_assert!(info.caps.max_x > 0 && info.caps.max_y > 0);
-                            let _ = iface.device_added(info.pid, &info.name).await;
-                            kernel_grab.refresh(XP_PEN_VID, &deco_protocol::DECO02_PIDS);
+                    let id = next_reader;
+                    next_reader = next_reader.wrapping_add(1);
+                    match attach(&state, &path, event_tx.clone(), exit_tx.clone(), id).await {
+                        Ok(Some((info, stop, role))) => {
+                            readers.push(HidReader {
+                                id,
+                                path: path.clone(),
+                                role,
+                                stop,
+                            });
+                            if role == InterfaceRole::Digitizer {
+                                info!(
+                                    pid = format_args!("{:#06x}", info.pid),
+                                    name = %info.name,
+                                    fw = %info.firmware,
+                                    path = %path,
+                                    interfaces = readers.len(),
+                                    max_x = info.caps.max_x,
+                                    max_y = info.caps.max_y,
+                                    press = info.caps.max_pressure,
+                                    "tablet attached"
+                                );
+                                debug_assert!(deco_protocol::is_deco02(info.pid));
+                                debug_assert!(info.caps.max_x > 0 && info.caps.max_y > 0);
+                                let _ = iface.device_added(info.pid, &info.name).await;
+                                kernel_grab.refresh(XP_PEN_VID, &deco_protocol::DECO02_PIDS);
+                            } else {
+                                info!(%path, ?role, "command interface open");
+                            }
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             error!(%e, pid = format_args!("{pid:#06x}"), %path, "failed to attach tablet")
                         }
@@ -181,15 +219,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 PlugEvent::Removed { pid, path } => {
                     info!(pid = format_args!("{pid:#06x}"), %path, "device removed");
-                    readers.retain(|(p, stop)| {
-                        if p == &path || path.is_empty() {
-                            stop.store(true, Ordering::Relaxed);
+                    readers.retain(|r| {
+                        if r.path == path || path.is_empty() {
+                            r.stop.store(true, Ordering::Relaxed);
                             false
                         } else {
                             true
                         }
                     });
-                    if readers.is_empty() {
+                    if !digitizer_open(&readers) {
                         *state.device.write().await = None;
                         kernel_grab.clear();
                         let _ = iface.device_removed(pid).await;
@@ -243,12 +281,14 @@ async fn attach(
     state: &Arc<AppState>,
     path: &str,
     event_tx: mpsc::Sender<DeviceEvent>,
-) -> Result<(DeviceInfo, Arc<AtomicBool>), String> {
-    let path = path.to_string();
-    let (dev, info) = tokio::task::spawn_blocking(move || {
+    exit_tx: mpsc::Sender<u64>,
+    reader_id: u64,
+) -> Result<Option<(DeviceInfo, Arc<AtomicBool>, InterfaceRole)>, String> {
+    let path_owned = path.to_string();
+    let (dev, info, role) = tokio::task::spawn_blocking(move || {
         let api = HidApi::new().map_err(|e| e.to_string())?;
         // Prefer the hidraw path; if empty, open first Deco 02.
-        if path.is_empty() {
+        if path_owned.is_empty() {
             let list = list_deco02(&api);
             let (_, p) = list
                 .first()
@@ -256,15 +296,22 @@ async fn attach(
                 .ok_or_else(|| "no device".to_string())?;
             open_and_init(&api, &p)
         } else {
-            open_and_init(&api, &path)
+            open_and_init(&api, &path_owned)
         }
     })
     .await
     .map_err(|e| e.to_string())??;
 
-    let caps: Caps = info.caps;
-    *state.device.write().await = Some(info.clone());
-    {
+    if role == InterfaceRole::Unused {
+        info!(path, "closed unused interface without writing");
+        return Ok(None);
+    }
+
+    // Only the digitizer owns the published device. The command interface
+    // has no axes; letting it overwrite caps hides the pen.
+    if role == InterfaceRole::Digitizer {
+        let caps: Caps = info.caps;
+        *state.device.write().await = Some(info.clone());
         let mut slot = state.input.lock().await;
         let need_recreate = slot.as_ref().map_or(true, |input| {
             input.max_x != caps.max_x.max(1) as i32 || input.max_y != caps.max_y.max(1) as i32
@@ -290,9 +337,10 @@ async fn attach(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = Arc::clone(&stop);
+    let release = role == InterfaceRole::Command;
     std::thread::Builder::new()
         .name("deco-hid".into())
-        .spawn(move || read_loop(dev, event_tx, stop2))
+        .spawn(move || read_loop(dev, event_tx, stop2, release, reader_id, exit_tx))
         .map_err(|e| e.to_string())?;
-    Ok((info, stop))
+    Ok(Some((info, stop, role)))
 }
