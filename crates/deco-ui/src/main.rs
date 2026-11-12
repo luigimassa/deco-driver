@@ -516,7 +516,6 @@ struct Ui {
     p1y: gtk::Scale,
     keys: [adw::ComboRow; 6],
     pen_btn1: adw::ComboRow,
-    pen_btn2: adw::ComboRow,
     ring_left: adw::ComboRow,
     ring_right: adw::ComboRow,
     orientation: adw::ComboRow,
@@ -540,7 +539,6 @@ fn apply_config(ui: &Ui, cfg: &DriverConfig) {
     ui.p1x.set_value(cfg.pen.curve.p1x);
     ui.p1y.set_value(cfg.pen.curve.p1y);
     ui.pen_btn1.set_selected(preset_index(&cfg.pen.btn1));
-    ui.pen_btn2.set_selected(preset_index(&cfg.pen.btn2));
     for i in 0..6 {
         ui.keys[i].set_selected(preset_index(&cfg.keys.k[i]));
     }
@@ -568,7 +566,6 @@ fn collect_config(ui: &Ui) -> DriverConfig {
     cfg.pen.curve.p1x = ui.p1x.value();
     cfg.pen.curve.p1y = ui.p1y.value();
     cfg.pen.btn1 = preset_binding(ui.pen_btn1.selected());
-    cfg.pen.btn2 = preset_binding(ui.pen_btn2.selected());
     for i in 0..6 {
         cfg.keys.k[i] = preset_binding(ui.keys[i].selected());
     }
@@ -766,10 +763,12 @@ fn build_window(app: &adw::Application, background: bool) {
         "Tasto superiore",
         "Sul fusto, il più vicino alla punta",
     );
-    let pen_btn2 = binding_combo(
-        "Tasto inferiore",
-        "Sul fusto, il più vicino al fondo",
-    );
+    // The tablet reports this button as its own eraser (HID Invert/Eraser),
+    // not as a remappable button: show it, don't offer a choice.
+    let pen_btn2 = adw::ActionRow::builder()
+        .title("Tasto inferiore")
+        .subtitle("Gomma: tienilo premuto mentre tocchi per cancellare")
+        .build();
     let pen_page = adw::PreferencesPage::new();
     let pg = adw::PreferencesGroup::builder()
         .title("Penna")
@@ -932,7 +931,6 @@ fn build_window(app: &adw::Application, background: bool) {
         p1y,
         keys,
         pen_btn1,
-        pen_btn2,
         ring_left,
         ring_right,
         orientation,
