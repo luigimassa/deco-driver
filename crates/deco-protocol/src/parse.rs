@@ -460,7 +460,7 @@ fn parse_hid_keyboard(buf: &[u8]) -> ParsedReport {
     }
 }
 
-/// Report ID 0x07 digitizer (Tip, Barrel, Invert, InRange, X16, Y16, Pressure16).
+/// Report ID 0x07 digitizer (Tip, Barrel, Eraser, Invert, InRange, X16, Y16, Pressure16).
 fn parse_hid_digitizer(buf: &[u8]) -> ParsedReport {
     if buf.len() < 8 {
         return ParsedReport {
@@ -469,10 +469,12 @@ fn parse_hid_digitizer(buf: &[u8]) -> ParsedReport {
         };
     }
     let b = buf[1];
-    let tip = b & 0x01 != 0;
+    // Bit 2 = Eraser (eraser touching), bit 3 = Invert (eraser side in range).
+    // Neither is a button: the tablet says "erasing" for as long as they are set.
+    let erasing = b & 0x04 != 0;
+    let eraser = erasing || b & 0x08 != 0;
+    let tip = b & 0x01 != 0 || erasing;
     let btn1 = b & 0x02 != 0;
-    let eraser = b & 0x04 != 0;
-    let btn2 = b & 0x08 != 0;
     let in_range = b & 0x10 != 0 || tip || eraser;
     let x = u32::from(u16::from_le_bytes([buf[2], buf[3]]));
     let y = u32::from(u16::from_le_bytes([buf[4], buf[5]]));
@@ -480,9 +482,6 @@ fn parse_hid_digitizer(buf: &[u8]) -> ParsedReport {
     let mut btn_pressed = 0u8;
     if btn1 {
         btn_pressed |= 1;
-    }
-    if btn2 {
-        btn_pressed |= 2;
     }
     ParsedReport {
         flags: FLAG_PEN | FLAG_PEN_BTN,
@@ -761,6 +760,26 @@ mod tests {
             "mouse iface must not be vendor ring, got {:?}",
             parsed.events
         );
+    }
+
+    #[test]
+    fn hid_digitizer_eraser_bits_are_not_a_button() {
+        // Report descriptor: bit2 = Eraser (touching), bit3 = Invert (eraser side in range).
+        let frame = |status: u8| {
+            let buf = [0x07, status, 0, 0, 0, 0, 0x10, 0x00];
+            match parse_report(&buf).events.remove(0) {
+                DeviceEvent::Pen(p) => p,
+                other => panic!("{other:?}"),
+            }
+        };
+        let hover = frame(0x98);
+        assert!(hover.eraser && hover.in_range && !hover.tip);
+        assert_eq!(hover.btn_pressed, 0);
+        let touch = frame(0x94);
+        assert!(touch.eraser && touch.tip);
+        assert_eq!(touch.btn_pressed, 0);
+        let pen = frame(0x91);
+        assert!(!pen.eraser && pen.tip);
     }
 
     #[test]

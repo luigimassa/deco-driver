@@ -114,6 +114,7 @@ impl ActionEngine {
                 pen.tip,
                 pen.btn_pressed & 1 != 0,
                 pen.btn_pressed & 2 != 0,
+                pen.eraser,
             );
         }
         self.last_x = x;

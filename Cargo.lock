@@ -269,7 +269,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "deco-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deco-protocol",
  "dirs",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "deco-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deco-config",
  "deco-input",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "deco-input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "deco-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "deco-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deco-config",
  "deco-protocol",

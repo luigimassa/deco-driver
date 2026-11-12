@@ -321,6 +321,15 @@ impl AbsDevice {
         emit(&mut self.file, EV_KEY, BTN_STYLUS2, i32::from(stylus2))?;
         syn(&mut self.file)
     }
+
+    /// Lift the tool and take it out of proximity, without touching X/Y.
+    fn release(&mut self, tool: u16) -> io::Result<()> {
+        emit(&mut self.file, EV_ABS, ABS_PRESSURE, 0)?;
+        emit(&mut self.file, EV_KEY, tool, 0)?;
+        emit(&mut self.file, EV_KEY, BTN_STYLUS, 0)?;
+        emit(&mut self.file, EV_KEY, BTN_STYLUS2, 0)?;
+        syn(&mut self.file)
+    }
 }
 
 impl Drop for AbsDevice {
@@ -454,7 +463,10 @@ pub struct InputDevices {
     pub max_x: i32,
     pub max_y: i32,
     pub max_pressure: i32,
+    /// Manual pen/eraser toggle (express key binding).
     eraser_mode: bool,
+    /// Which device got the last frame: false = pen, true = eraser.
+    erasing: bool,
 }
 
 impl InputDevices {
@@ -468,6 +480,7 @@ impl InputDevices {
             max_y,
             max_pressure,
             eraser_mode: false,
+            erasing: false,
         })
     }
 
@@ -490,6 +503,7 @@ impl InputDevices {
         tip: bool,
         stylus: bool,
         stylus2: bool,
+        eraser: bool,
     ) -> io::Result<()> {
         let x = x.clamp(0, self.max_x);
         let y = y.clamp(0, self.max_y);
@@ -498,45 +512,28 @@ impl InputDevices {
         } else {
             0
         };
-        if self.eraser_mode {
-            let _ = self
-                .pen
-                .update(x, y, 0, tilt_x, tilt_y, BTN_TOOL_PEN, false, false, false);
-            self.eraser.update(
-                x,
-                y,
-                pressure,
-                tilt_x,
-                tilt_y,
-                BTN_TOOL_RUBBER,
-                in_range,
-                stylus,
-                stylus2,
-            )
-        } else {
-            let _ = self.eraser.update(
-                x,
-                y,
-                0,
-                tilt_x,
-                tilt_y,
-                BTN_TOOL_RUBBER,
-                false,
-                false,
-                false,
-            );
-            self.pen.update(
-                x,
-                y,
-                pressure,
-                tilt_x,
-                tilt_y,
-                BTN_TOOL_PEN,
-                in_range,
-                stylus,
-                stylus2,
-            )
+        // `eraser` is the tablet's own signal (eraser end or eraser button) and
+        // lasts only while it is set; `eraser_mode` is the manual toggle.
+        let erasing = self.eraser_mode || eraser;
+        if erasing != self.erasing {
+            // The device going idle leaves proximity once, then gets no events
+            // at all: libinput turns any axis event without a tool into a
+            // second, always-hovering pen that apps see next to the real one.
+            let _ = if erasing {
+                self.pen.release(BTN_TOOL_PEN)
+            } else {
+                self.eraser.release(BTN_TOOL_RUBBER)
+            };
+            self.erasing = erasing;
         }
+        let (active, tool) = if erasing {
+            (&mut self.eraser, BTN_TOOL_RUBBER)
+        } else {
+            (&mut self.pen, BTN_TOOL_PEN)
+        };
+        active.update(
+            x, y, pressure, tilt_x, tilt_y, tool, in_range, stylus, stylus2,
+        )
     }
 
     pub fn do_mouse_func(&mut self, id: u8, pressed: bool) -> io::Result<()> {
@@ -713,5 +710,64 @@ mod tests {
         assert_eq!(keycode("Z"), Some(KEY_Z));
         assert_eq!(keycode("["), Some(KEY_LEFTBRACE));
         assert_eq!(keycode("nope"), None);
+    }
+
+    /// Unlinked scratch file standing in for a uinput node.
+    fn scratch(name: &str) -> File {
+        let path = std::env::temp_dir().join(format!(
+            "deco-input-test-{}-{name}",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        file
+    }
+
+    #[test]
+    fn idle_tool_device_stays_silent() {
+        let mut devs = InputDevices {
+            pen: AbsDevice { file: scratch("pen") },
+            mouse: RelDevice { file: scratch("mouse") },
+            eraser: AbsDevice { file: scratch("eraser") },
+            kbd: KeyDevice { file: scratch("kbd") },
+            max_x: 100,
+            max_y: 100,
+            max_pressure: 100,
+            eraser_mode: false,
+            erasing: false,
+        };
+        let len = |f: &File| f.metadata().unwrap().len();
+        let frame = |devs: &mut InputDevices, eraser: bool| {
+            devs.update_digit(10, 10, 50, 0, 0, true, true, false, false, eraser)
+                .unwrap();
+            (len(&devs.pen.file), len(&devs.eraser.file))
+        };
+
+        let (pen, eraser) = frame(&mut devs, false);
+        assert!(pen > 0);
+        assert_eq!(eraser, 0, "idle eraser got events");
+
+        // Tablet says "erasing": pen leaves proximity once, then stays silent.
+        let (pen_left, eraser) = frame(&mut devs, true);
+        assert!(pen_left > pen, "pen must leave proximity");
+        assert!(eraser > 0);
+        assert_eq!(frame(&mut devs, true).0, pen_left, "idle pen got events");
+
+        // Signal gone: back to the pen by itself, eraser silent again.
+        let (pen_back, eraser_left) = frame(&mut devs, false);
+        assert!(pen_back > pen_left);
+        assert_eq!(frame(&mut devs, false).1, eraser_left, "idle eraser got events");
+
+        // The manual toggle picks the eraser without the tablet's signal.
+        devs.set_eraser_mode(true);
+        let (pen_left, eraser) = frame(&mut devs, false);
+        assert!(eraser > eraser_left);
+        assert_eq!(frame(&mut devs, false).0, pen_left, "idle pen got events");
     }
 }
